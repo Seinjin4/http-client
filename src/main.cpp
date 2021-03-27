@@ -1,48 +1,91 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <sstream>
 #include <stdexcept>
 #include <winsock2.h>
 #include <pthread.h>
 
-#include "tools/json.hpp"
+#include "tools/encryption.hpp"
 
-using json = nlohmann::json;
-
-const char* HttpJsonToCstr(json j_file)
-{
-    std::string str = "";
-
-    if(j_file.find("Start-line") == j_file.end())
-        throw std::invalid_argument("\"Start-line\" key was not found in the JSON file...");
-
-    str += j_file["Start-line"].get<std::string>() + "\r\n";
-
-    if(j_file.find("Headers") == j_file.end())
-        throw std::invalid_argument("\"Headers\" key was not found in the JSON file...");
-
-    for(auto it = j_file["Headers"].begin(); it != j_file["Headers"].end(); ++it)
-        str += it.key() + ": " + it.value().get<std::string>() + "\r\n";
-
-    str += "\r\n";
-
-    if(j_file.find("Body") == j_file.end())
-        return str.c_str();
-
-    for(auto it = j_file["Body"].begin(); it != j_file["Body"].end(); ++it)
-    {
-        str += it.value().get<std::string>() + "\r\n";        
-    }
-
-    return str.c_str();
-}
-
-const char* UriToHttpRequest(const char* url)
+std::string HostnameFromUrl(const char* url)
 {
     std::string url_str = url;
+    size_t search_head = 0;
+
+    if((search_head = url_str.find( "://", search_head)) != std::string::npos)
+    {
+        url_str.erase(0, search_head + 3);
+        size_t search_head = 0;
+    }
+
+    if((search_head = url_str.find( "@", search_head)) != std::string::npos)
+    {
+        url_str.erase(0, search_head + 1);
+        size_t search_head = 0;
+    }
+
+    if((search_head = url_str.find( ":", search_head)) != std::string::npos)
+        return url_str.substr(0, search_head);
+    else if((search_head = url_str.find( "/", search_head)) != std::string::npos)
+        return url_str.substr(0, search_head);
+    else if((search_head = url_str.find( "?", search_head)) != std::string::npos)
+        return url_str.substr(0, search_head);
+    else if((search_head = url_str.find( "#", search_head)) != std::string::npos)
+        return url_str.substr(0, search_head);
+
+    return url_str;
+}
+
+int PortFromUrl(const char* url)
+{
+    std::string url_str = url;
+    size_t search_head = 0;
+
+    if((search_head = url_str.find( "://", search_head)) != std::string::npos)
+    {
+        url_str.erase(0, search_head + 3);
+        size_t search_head = 0;
+    }
+
+    if((search_head = url_str.find( "@", search_head)) != std::string::npos)
+    {
+        url_str.erase(0, search_head + 1);
+        size_t search_head = 0;
+    }
+
+    if((search_head = url_str.find( ":", search_head)) == std::string::npos)
+        return -1;
+    else
+    {
+        url_str.erase(0, search_head + 1);
+        size_t search_head = 0;
+    }
+
+    if((search_head = url_str.find( "/", search_head)) != std::string::npos)
+        url_str = url_str.substr(0, search_head).c_str();
+    else if((search_head = url_str.find( "?", search_head)) != std::string::npos)
+        url_str = url_str.substr(0, search_head).c_str();
+    else if((search_head = url_str.find( "#", search_head)) != std::string::npos)
+        url_str = url_str.substr(0, search_head).c_str();
+
+    std::stringstream port_string(url_str);
+
+    int port;
+    port_string >> port;
+
+    return port;
+}
+
+std::string UrlToHttpRequest(const char* url, std::string method = "GET", std::string protocol_version = "HTTP/1.1")
+{
+    
+    std::string url_str = url;
     std::string http_headers = "";
+    std::string start_line = "";
     size_t search_head = 0;
     size_t new_search_head = 0;
+
     /*  
         URI = scheme:[//authority]path[?query][#fragment]
         authority = [userinfo@]host[:port]
@@ -58,86 +101,32 @@ const char* UriToHttpRequest(const char* url)
 
     //Protocol
     if((new_search_head = url_str.find( "://", search_head)) != std::string::npos)
-        {
+    {
         std::string protocol = url_str.substr(search_head, new_search_head - search_head);
-        std::cout << "Protocol: " << protocol << std::endl;
         if(protocol != "http")
             throw std::invalid_argument("Error: " + protocol + "protocol provided, expecting http protocol...");
 
-        url_str.erase(search_head, new_search_head - search_head + 3); // Deleting "http://" from the start
-        }
+        // url_str.erase(search_head, new_search_head - search_head + 3); // Deleting "http://" from the start
 
-    std::cout << "After Protocol url_str: " << url_str << std::endl;
+        search_head = new_search_head + 3; // placing search_head after "://"
+    }
 
     //User info
-    if((new_search_head = url_str.find( "@", search_head)) != std::string::npos)
-        {
+    if((new_search_head = url_str.find( "@", search_head)) != std::string::npos || url_str.find( ":", search_head) < new_search_head)
+    {
         std::string user_info = url_str.substr(search_head, new_search_head - search_head);
-        std::cout << "Authorization: Basic " + user_info << std::endl;
-        http_headers.append("Authorization: Basic " + user_info + "\r\n");
-        url_str.erase(search_head, new_search_head - search_head + 1); // Deleting "[userinfo]@" front the start
-        }
 
-    std::cout << "After Authentication url_str: " << url_str << std::endl;
-    
-    //Host name and port
-    if(url_str.find( ":", search_head) < url_str.find( "/", search_head))
-        {  
-        new_search_head = url_str.find( ":", search_head);
-        std::string host_name = url_str.substr(search_head, new_search_head - search_head);
-        http_headers.append("Host: " + host_name + "\r\n");
-        url_str.erase(search_head, new_search_head - search_head);
-
-        if(url_str[search_head] == ':')
-            {
-            new_search_head = url_str.find( "/", search_head);
-            url_str.erase(search_head, new_search_head - search_head);
-            }
-        }
-    else if(url_str.find( ":", search_head) > url_str.find( "/", search_head))
-    {
-        new_search_head == url_str.find( "/", search_head);
-        std::string host_name = url_str.substr(search_head, new_search_head - search_head);
-        http_headers.append("Host: " + host_name + "\r\n");
-        url_str.erase(search_head, new_search_head - search_head - 1);
-    }
-    else
-    {
-        http_headers.append("Host: " + url_str + "\r\n");
-        return http_headers.c_str(); // return http request
+        http_headers.append("Authorization: Basic " + base64_encode(user_info) + "\r\n");
+        url_str.erase(search_head, new_search_head - search_head + 1); // Deleting "[userinfo@]" from the url
     }
 
-    //Check if url_str is empty
-    if(url_str.empty())
-        //return http request
+    int port = PortFromUrl(url);
+    // std::cout << "PORT FROM REQUEST GEN: " << port << std::endl;
+    http_headers += "Host: " + HostnameFromUrl(url) + (port != -1 ? (":" + std::to_string(port)) : "") + "\r\n";
 
-    if((new_search_head = url_str.find( "?", search_head)) != std::string::npos ||
-        (new_search_head = url_str.find( "#", search_head)) != std::string::npos)
-        {
-        // Parse path
-        }
-    
-    //Check if url_str is empty
-    if(url_str.empty())
-        //return http request
+    start_line = method + " " + url_str + " " + protocol_version + "\r\n";
+    return start_line + http_headers;
 
-    if((new_search_head = url_str.find( "#", search_head)) != std::string::npos)
-        {
-        // Parse query
-        }
-    
-    //Check if url_str is empty
-    if(!url_str.empty())
-        {
-        //Parse hash
-        }
-        
-    return http_headers.c_str();
-}
-
-std::string getHostNameFromJson(json j_file)
-{
-    return j_file["Headers"]["Host"].get<std::string>();
 }
 
 std::string processHttpRequest(const char* httpRequest, const char* hostName)
@@ -204,8 +193,11 @@ int main(int argc, char **argv)
 
     // std::cout << "Response: " << std::endl;
     // std::cout << processHttpRequest(HttpJsonToCstr(j), getHostNameFromJson(j).c_str()) << std::endl;
-    
-    std::cout << UriToHttpRequest("http://www.google.com:80") << std::endl;
+    // std::cout << "HOST: " << HostnameFromUrl("http://ab:cd@www.google.com:80/anime/isshit?key=lol").c_str() << std::endl;
+
+    // std::cout << "PORT: " << PortFromUrl("http://ab:cd@www.google.com:80/anime/isshit?key=lol") << std::endl;
+
+    std::cout << "HTTP REQUEST: " << std::endl << UrlToHttpRequest("http://ab:cd@www.google.com:80/anime/isshit?key=lol") << std::endl;
 
     return 0;
 }
